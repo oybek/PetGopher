@@ -1,0 +1,55 @@
+name: master
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  Test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.24.2'
+      - name: Pull
+        run: |
+          docker pull postgres:12
+      - name: Test
+        run: |
+          go test ./...
+
+  Deploy:
+    if: ${{ github.ref == 'refs/heads/master' }}
+    needs: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.24.2'
+      - name: Build
+        run: |
+          CGO_ENABLED=0 GOOS=linux go build -o ${{ github.sha }}
+      - name: Deploy
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: ${{ github.sha }}
+          target: /home/bender/petg/
+      - name: Update app
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            chmod +x /home/bender/petg/${{ github.sha }}
+            ln -sf /home/bender/petg/${{ github.sha }} /home/bender/petg/app
+            sudo systemctl restart petg
