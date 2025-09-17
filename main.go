@@ -98,18 +98,33 @@ func main() {
 		MaxRoutines: ext.DefaultMaxRoutines,
 	})
 
+	lastRunTime := time.Now().Add(-time.Minute)
+
 	dispatcher.AddHandler(
 		handlers.NewMessage(message.Text, func(b *gotgbot.Bot, ctx *ext.Context) error {
 			chat := ctx.EffectiveChat
 			code := ctx.Message.Text
-			if strings.HasPrefix(code, "/run") {
-				code = strings.TrimPrefix(code, "/run")
+			if code, found := strings.CutPrefix(code, "/run"); found {
+				if time.Since(lastRunTime) < time.Minute {
+					_, err := bot.SendMessage(chat.Id, "I'm tried, I can run code once in a minute", nil)
+					return err
+				}
+
 				output, err := executeGoCode(code)
 				if err != nil {
 					_, err := bot.SendMessage(chat.Id, fmt.Sprintf("Error: %v", err), nil)
 					return err
 				}
-				_, err = bot.SendMessage(chat.Id, output, nil)
+				_, err = bot.SendMessage(chat.Id, "```\n"+output+"\n```", &gotgbot.SendMessageOpts{
+					ParseMode: "MarkdownV2",
+					ReplyParameters: &gotgbot.ReplyParameters{
+						ChatId:    chat.Id,
+						MessageId: ctx.Message.MessageId,
+					},
+				})
+
+				lastRunTime = time.Now()
+
 				return err
 			}
 			_, err = bot.SendMessage(chat.Id, "/run <your_code>", nil)
