@@ -49,7 +49,7 @@ func main() {
 	}
 
 	_, err = s.NewJob(
-		gocron.DailyJob(1, gocron.NewAtTimes(gocron.NewAtTime(20, 50, 0))),
+		gocron.DailyJob(1, gocron.NewAtTimes(gocron.NewAtTime(11, 30, 0))),
 		gocron.NewTask(func() {
 			log.Printf("running listOpenMRs at %s\n", time.Now().Format(time.RFC3339))
 
