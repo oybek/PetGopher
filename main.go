@@ -2,152 +2,208 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"slices"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/PaulSonOfLars/gotgbot/v2"
-	"github.com/PaulSonOfLars/gotgbot/v2/ext"
-	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers"
-	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers/filters/message"
+	"github.com/go-co-op/gocron/v2"
+	gitlab "gitlab.com/gitlab-org/api/client-go"
 )
 
 // Config holds app configuration
 type Config struct {
-	TelegramToken string
+	GitlabBaseURL   string
+	GitlabToken     string
+	GitlabProjectID string
+	SlackWebhookURL string
 }
 
 func loadConfig() *Config {
 	return &Config{
-		TelegramToken: os.Getenv("TELEGRAM_TOKEN"),
+		GitlabBaseURL:   os.Getenv("GITLAB_BASE_URL"),
+		GitlabToken:     os.Getenv("GITLAB_TOKEN"),
+		GitlabProjectID: os.Getenv("GITLAB_PROJECT_ID"),
+		SlackWebhookURL: os.Getenv("SLACK_WEBHOOK_URL"),
 	}
-}
-
-// Go Playground execute request/response
-type playgroundRequest struct {
-	Version int    `json:"version"`
-	Body    string `json:"body"`
-}
-
-type PlaygroundEvent struct {
-	Message string `json:"Message"`
-	Kind    string `json:"Kind"` // stdout, stderr, etc.
-	Delay   int    `json:"Delay"`
-}
-
-type PlaygroundResponse struct {
-	Errors      string            `json:"Errors"`
-	Events      []PlaygroundEvent `json:"Events"`
-	Status      int               `json:"Status"`
-	IsTest      bool              `json:"IsTest"`
-	TestsFailed int               `json:"TestsFailed"`
-}
-
-func executeGoCode(code string) (string, error) {
-	reqBody := playgroundRequest{
-		Version: 2,
-		Body:    code,
-	}
-	data, _ := json.Marshal(reqBody)
-
-	resp, err := http.Post("https://play.golang.org/compile", "application/json", bytes.NewBuffer(data))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var result PlaygroundResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", err
-	}
-
-	if result.Errors != "" {
-		return result.Errors, nil
-	}
-
-	output := ""
-	for _, e := range result.Events {
-		if e.Kind == "stdout" {
-			output += e.Message
-		}
-	}
-	return output, nil
 }
 
 func main() {
 	cfg := loadConfig()
 
-	// Init Telegram bot
-	bot, err := gotgbot.NewBot(cfg.TelegramToken, nil)
+	gitlabClient, err := newGitlabClient(cfg.GitlabBaseURL, cfg.GitlabToken)
 	if err != nil {
-		log.Fatalf("failed to create bot: %v", err)
+		log.Fatalf("failed to create gitlab client: %v\n", err)
 	}
 
-	// Set up updater
-	dispatcher := ext.NewDispatcher(&ext.DispatcherOpts{
-		Error: func(b *gotgbot.Bot, ctx *ext.Context, err error) ext.DispatcherAction {
-			log.Println("an error occurred while handling update:", err.Error())
-			return ext.DispatcherActionNoop
-		},
-		MaxRoutines: ext.DefaultMaxRoutines,
-	})
+	s, err := gocron.NewScheduler(gocron.WithLocation(time.FixedZone("UTC+6", 6*3600)))
+	if err != nil {
+		log.Fatalf("failed to create scheduler: %v\n", err)
+	}
 
-	lastRunTime := time.Now().Add(-time.Minute)
+	_, err = s.NewJob(
+		gocron.DailyJob(1, gocron.NewAtTimes(gocron.NewAtTime(20, 50, 0))),
+		gocron.NewTask(func() {
+			log.Printf("running listOpenMRs at %s\n", time.Now().Format(time.RFC3339))
 
-	dispatcher.AddHandler(
-		handlers.NewMessage(message.Text, func(b *gotgbot.Bot, ctx *ext.Context) error {
-			chat := ctx.EffectiveChat
-			code := ctx.Message.Text
-			if code, found := strings.CutPrefix(code, "/run"); found {
-				if time.Since(lastRunTime) < time.Minute {
-					_, err := bot.SendMessage(chat.Id, "I'm tried, I can run code once in a minute", nil)
-					return err
-				}
-
-				output, err := executeGoCode(code)
-				if err != nil {
-					_, err := bot.SendMessage(chat.Id, fmt.Sprintf("Error: %v", err), nil)
-					return err
-				}
-				_, err = bot.SendMessage(chat.Id, "```\n"+output+"\n```", &gotgbot.SendMessageOpts{
-					ParseMode: "MarkdownV2",
-					ReplyParameters: &gotgbot.ReplyParameters{
-						ChatId:    chat.Id,
-						MessageId: ctx.Message.MessageId,
-					},
-				})
-
-				lastRunTime = time.Now()
-
-				return err
+			mrs, err := listOpenMRs(gitlabClient, cfg.GitlabProjectID)
+			if err != nil {
+				log.Printf("failed to list open MRs: %v\n", err)
+				return
 			}
-			_, err = bot.SendMessage(chat.Id, "/run <your_code>", nil)
-			return err
+
+			msg := formatMRsForSlack(mrs)
+			err = postToSlackChannel(cfg.SlackWebhookURL, msg)
+			if err != nil {
+				log.Printf("failed to post to slack: %v\n", err)
+			}
 		}),
 	)
+	if err != nil {
+		log.Fatalf("failed to add job: %v\n", err)
+	}
 
-	updater := ext.NewUpdater(dispatcher, nil)
-	// Start polling
-	err = updater.StartPolling(bot, &ext.PollingOpts{
-		DropPendingUpdates: true,
-		GetUpdatesOpts: &gotgbot.GetUpdatesOpts{
-			Timeout: 9,
-			RequestOpts: &gotgbot.RequestOpts{
-				Timeout: time.Second * 10,
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+	defer stop()
+
+	s.Start()
+	log.Println("app started, waiting for signal...")
+
+	<-ctx.Done()
+}
+
+func newGitlabClient(baseURL, token string) (*gitlab.Client, error) {
+	return gitlab.NewClient(token, gitlab.WithBaseURL(baseURL))
+}
+
+func listOpenMRs(client *gitlab.Client, projectID string) ([]*gitlab.BasicMergeRequest, error) {
+	ctx := context.Background()
+
+	mrs, _, err := client.MergeRequests.ListProjectMergeRequests(
+		projectID,
+		&gitlab.ListProjectMergeRequestsOptions{
+			State: gitlab.Ptr("opened"),
+			ListOptions: gitlab.ListOptions{
+				PerPage: 50,
+				Page:    1,
 			},
 		},
-	})
+		gitlab.WithContext(ctx),
+	)
 	if err != nil {
-		log.Fatalf("failed to start polling: %v", err)
+		return nil, err
 	}
-	log.Printf("Bot started as @%s", bot.User.Username)
 
-	// Block forever
-	updater.Idle()
+	return mrs, nil
+}
+
+func postToSlackChannel(webhookURL, text string) error {
+	payload := map[string]string{
+		"text": text,
+	}
+
+	bs, _ := json.Marshal(payload)
+
+	resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(bs))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("slack webhook status: %s", resp.Status)
+	}
+
+	return nil
+}
+
+func humanDuration(t time.Time) string {
+	d := time.Since(t)
+
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		days := int(d.Hours()) / 24
+		hours := int(d.Hours()) % 24
+		warn := ""
+		if days > 2 {
+			warn = "❓"
+		}
+		if days > 3 {
+			warn = "😳"
+		}
+		if days > 5 {
+			warn = "💀"
+		}
+
+		if hours == 0 {
+			return fmt.Sprintf("%dd %s", days, warn)
+		}
+		return fmt.Sprintf("%dd %dh %s", days, hours, warn)
+	}
+}
+
+func formatMRsForSlack(mrs []*gitlab.BasicMergeRequest) string {
+	if len(mrs) == 0 {
+		return "✅ No open merge requests"
+	}
+
+	var b strings.Builder
+	b.WriteString("*Open Merge Requests:*\n")
+
+	slices.SortFunc(mrs, func(a, b *gitlab.BasicMergeRequest) int {
+		if a == nil || b == nil {
+			return 0
+		}
+
+		if a.CreatedAt.Before(*b.CreatedAt) {
+			return -1
+		} else if a.CreatedAt.After(*b.CreatedAt) {
+			return 1
+		}
+		return 0
+	})
+
+	for _, mr := range mrs {
+		createdAt := time.Time{}
+		if mr.CreatedAt != nil {
+			createdAt = *mr.CreatedAt
+		}
+
+		liveTime := "unknown"
+		if !createdAt.IsZero() {
+			liveTime = humanDuration(createdAt)
+		}
+
+		author := "unknown"
+		if mr.Author != nil {
+			author = mr.Author.Name
+		}
+
+		b.WriteString(fmt.Sprintf(
+			"• <%s|%s> - %s *%s*\n",
+			mr.WebURL,
+			mr.Title,
+			author,
+			liveTime,
+		))
+	}
+
+	return b.String()
 }
