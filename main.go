@@ -141,21 +141,12 @@ func humanDuration(t time.Time) string {
 	default:
 		days := int(d.Hours()) / 24
 		hours := int(d.Hours()) % 24
-		warn := ""
-		if days > 2 {
-			warn = "❓"
-		}
-		if days > 3 {
-			warn = "😳"
-		}
-		if days > 5 {
-			warn = "💀"
-		}
+		emoji := getMRAgeEmoji(int(d.Hours()))
 
 		if hours == 0 {
-			return fmt.Sprintf("%dd %s", days, warn)
+			return fmt.Sprintf("%dd %s", days, emoji)
 		}
-		return fmt.Sprintf("%dd %dh %s", days, hours, warn)
+		return fmt.Sprintf("%dd %dh %s", days, hours, emoji)
 	}
 }
 
@@ -206,4 +197,17 @@ func formatMRsForSlack(mrs []*gitlab.BasicMergeRequest) string {
 	}
 
 	return b.String()
+}
+
+func getMRAgeEmoji(ageHours int) string {
+	if ageHours <= 2*24 {
+		return "🟢"
+	}
+	if ageHours <= 3*24 {
+		return "🟠"
+	}
+	if ageHours <= 5*24 {
+		return "🔴"
+	}
+	return "💀"
 }
