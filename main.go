@@ -18,8 +18,8 @@ import (
 	gitlab "gitlab.com/gitlab-org/api/client-go"
 )
 
-// Config holds app configuration
 type Config struct {
+	DailyCallURL    string
 	GitlabBaseURL   string
 	GitlabToken     string
 	GitlabProjectID string
@@ -28,6 +28,7 @@ type Config struct {
 
 func loadConfig() *Config {
 	return &Config{
+		DailyCallURL:    os.Getenv("DAILY_CALL_URL"),
 		GitlabBaseURL:   os.Getenv("GITLAB_BASE_URL"),
 		GitlabToken:     os.Getenv("GITLAB_TOKEN"),
 		GitlabProjectID: os.Getenv("GITLAB_PROJECT_ID"),
@@ -49,7 +50,7 @@ func main() {
 	}
 
 	_, err = s.NewJob(
-		gocron.DailyJob(1, gocron.NewAtTimes(gocron.NewAtTime(11, 50, 0))),
+		gocron.DailyJob(1, gocron.NewAtTimes(gocron.NewAtTime(12, 15, 0))),
 		gocron.NewTask(func() {
 			log.Printf("running listOpenMRs at %s\n", time.Now().Format(time.RFC3339))
 
@@ -61,6 +62,22 @@ func main() {
 
 			msg := formatMRsForSlack(mrs)
 			err = postToSlackChannel(cfg.SlackWebhookURL, msg)
+			if err != nil {
+				log.Printf("failed to post to slack: %v\n", err)
+			}
+		}),
+	)
+	if err != nil {
+		log.Fatalf("failed to add job: %v\n", err)
+	}
+
+	_, err = s.NewJob(
+		gocron.DailyJob(1, gocron.NewAtTimes(gocron.NewAtTime(12, 30, 0))),
+		gocron.NewTask(func() {
+			err = postToSlackChannel(
+				cfg.SlackWebhookURL,
+				fmt.Sprintf("<!channel> 👋 Daily standup\n👉 %s", cfg.DailyCallURL),
+			)
 			if err != nil {
 				log.Printf("failed to post to slack: %v\n", err)
 			}
