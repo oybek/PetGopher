@@ -44,7 +44,8 @@ func main() {
 		log.Fatalf("failed to create gitlab client: %v\n", err)
 	}
 
-	s, err := gocron.NewScheduler(gocron.WithLocation(time.FixedZone("UTC+6", 6*3600)))
+	loc := time.FixedZone("UTC+6", 6*3600)
+	s, err := gocron.NewScheduler(gocron.WithLocation(loc))
 	if err != nil {
 		log.Fatalf("failed to create scheduler: %v\n", err)
 	}
@@ -52,6 +53,12 @@ func main() {
 	_, err = s.NewJob(
 		gocron.DailyJob(1, gocron.NewAtTimes(gocron.NewAtTime(12, 15, 0))),
 		gocron.NewTask(func() {
+			wd := time.Now().In(loc).Weekday()
+			if wd == time.Saturday || wd == time.Sunday {
+				log.Printf("skipping MR reports on weekend: %s", wd)
+				return
+			}
+
 			log.Printf("running listOpenMRs at %s\n", time.Now().Format(time.RFC3339))
 
 			mrs, err := listOpenMRs(gitlabClient, cfg.GitlabProjectID)
@@ -74,12 +81,20 @@ func main() {
 	_, err = s.NewJob(
 		gocron.DailyJob(1, gocron.NewAtTimes(gocron.NewAtTime(12, 30, 0))),
 		gocron.NewTask(func() {
+			wd := time.Now().In(loc).Weekday()
+			if wd == time.Saturday || wd == time.Sunday {
+				log.Printf("skipping daily standup on weekend: %s", wd)
+				return
+			}
+
+			log.Printf("sending daily standup call %s\n", time.Now().Format(time.RFC3339))
+
 			err = postToSlackChannel(
 				cfg.SlackWebhookURL,
 				fmt.Sprintf("<!channel> 👋 Daily standup\n👉 %s", cfg.DailyCallURL),
 			)
 			if err != nil {
-				log.Printf("failed to post to slack: %v\n", err)
+				log.Printf("failed to post to slack: %v", err)
 			}
 		}),
 	)
